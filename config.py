@@ -17,17 +17,16 @@ COL_AIMS       = "Aims"
 COL_LABEL      = "Label"
 COL_CATEGORIES = "Categories"
 
-# ── Ollama settings ───────────────────────────────────────────
-OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_MODEL    = "qwen3.5:4b"        # ← updated
-OLLAMA_TIMEOUT  = 120                 # seconds per request
-OLLAMA_OPTIONS  = {
-    "temperature": 0.1,               # Low temp → consistent structured output
-    "num_predict": 1500,              # Max output tokens — JSON output ~800-1500 tokens
-    "num_ctx":     2048,              # Context window — long Aims & Scope can be ~1500 tokens
-}
-# NOTE: think=False is passed at TOP-LEVEL payload in call_ollama(), not here
-# Putting it in options silently fails on some Ollama versions
+# ── Transformers settings ────────────────────────────────────
+MODEL_NAME             = "Qwen/Qwen3.5-4B"
+MODEL_TRUST_REMOTE_CODE = True
+MODEL_MAX_NEW_TOKENS    = 1500
+MODEL_TEMPERATURE       = 0.1
+MODEL_TOP_P             = 0.9
+MODEL_REPETITION_PENALTY = 1.05
+MODEL_DO_SAMPLE         = True
+MODEL_DEVICE_MAP        = "auto"
+MODEL_TORCH_DTYPE       = "auto"
 
 # ── Pipeline settings ─────────────────────────────────────────
 BATCH_SIZE       = 10     # Save checkpoint every N records

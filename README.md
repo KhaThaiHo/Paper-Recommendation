@@ -1,6 +1,6 @@
 # Journal Metadata Extraction Pipeline
 
-Trích xuất `scientific_domains` và `research_focuses` từ 1406 journals dùng Ollama local.
+Trích xuất `scientific_domains` và `research_focuses` từ 1406 journals bằng Transformers chạy local.
 
 ## Cấu trúc project
 
@@ -10,6 +10,7 @@ journal_extractor/
 ├── prompt_builder.py   # Prompt engineering + few-shot examples
 ├── extractor.py        # Pipeline chính (checkpoint, retry, JSONL append)
 ├── inspect_output.py   # Inspect & validate kết quả
+├── debug_transformers.py # Smoke test cho model Transformers
 ├── requirements.txt
 ├── data/
 │   └── journals.csv    # ← đặt file input của bạn vào đây
@@ -25,9 +26,9 @@ journal_extractor/
 ```bash
 pip install -r requirements.txt
 
-# Đảm bảo Ollama đang chạy
-ollama serve
-ollama pull qwen3.5:4b    # hoặc model bạn muốn dùng
+# Lần chạy đầu sẽ tự tải model từ Hugging Face Hub
+# Nếu model bị gated/private thì đăng nhập trước:
+# huggingface-cli login
 ```
 
 ## Chạy pipeline
@@ -38,11 +39,14 @@ ollama pull qwen3.5:4b    # hoặc model bạn muốn dùng
 # Chạy lần đầu (hoặc resume nếu đã chạy trước)
 python extractor.py
 
-# Dùng model khác
-python extractor.py --model qwen2.5:14b
+# Dùng model khác trên Hugging Face Hub
+python extractor.py --model Qwen/Qwen3.5-4B-Instruct
 
 # Retry các dòng failed
 python extractor.py --mode retry
+
+# Smoke test riêng cho model
+python debug_transformers.py
 ```
 
 ## Inspect kết quả
@@ -96,7 +100,7 @@ python extractor.py   # Tự động tiếp tục từ chỗ dừng
 
 Trong `config.py`, điều chỉnh:
 
-- `SLEEP_BETWEEN_MS = 0`    — tắt throttle nếu Ollama đủ mạnh
-- `BATCH_SIZE = 100`         — log ít hơn
-- `OLLAMA_MODEL = "..."`     — dùng model nhỏ hơn (e.g. gemma2:2b) cho papers
-- `OLLAMA_OPTIONS.num_predict = 512`  — cắt output ngắn hơn nếu papers đơn giản hơn.
+- `SLEEP_BETWEEN_MS = 0`    — tắt throttle nếu máy chạy model đủ nhanh
+- `BATCH_SIZE = 100`        — log ít hơn
+- `MODEL_NAME = "..."`      — đổi sang model nhỏ hơn hoặc hợp domain hơn
+- `MODEL_MAX_NEW_TOKENS = 512`  — cắt output ngắn hơn nếu papers đơn giản hơn.

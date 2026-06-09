@@ -20,19 +20,25 @@ import re
 import sys
 from pathlib import Path
 
-import requests
+import torch
 from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from config import (
     INPUT_CSV, OUTPUT_JSONL, CHECKPOINT_FILE, FAILED_LOG,
     COL_JOURNAL, COL_AIMS, COL_LABEL, COL_CATEGORIES,
-    OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT, OLLAMA_OPTIONS,
+    MODEL_NAME, MODEL_TRUST_REMOTE_CODE, MODEL_MAX_NEW_TOKENS,
+    MODEL_TEMPERATURE, MODEL_TOP_P, MODEL_REPETITION_PENALTY,
+    MODEL_DO_SAMPLE, MODEL_DEVICE_MAP, MODEL_TORCH_DTYPE,
     BATCH_SIZE, MAX_RETRIES, RETRY_DELAY_SEC, SLEEP_BETWEEN_MS,
     SCHEMA_VERSION,
 )
 from prompt_builder import build_prompt, build_prompt_no_system
 
 # ── Logging setup ─────────────────────────────────────────────
+Path("output").mkdir(exist_ok=True)
+Path("data").mkdir(exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -49,6 +55,9 @@ REQUIRED_KEYS = {
     "research_focuses",
     "research_focuses_evidence",
 }
+
+TOKENIZER = None
+MODEL = None
 
 
 # ── Helpers ───────────────────────────────────────────────────
@@ -189,33 +198,101 @@ def validate_output(data: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
-def call_ollama(messages: list[dict]) -> str | None:
-    """Call Ollama chat endpoint. Returns raw text or None on failure."""
-    payload = {
-        "model":    OLLAMA_MODEL,
-        "messages": messages,
-        "stream":   False,
-        "think":    False,        # top-level → actually disables thinking for qwen3
-        "options":  OLLAMA_OPTIONS,
+def _load_transformers_model() -> tuple[object, object]:
+    """Load the tokenizer and model once for the whole process."""
+    global TOKENIZER, MODEL
+    if TOKENIZER is not None and MODEL is not None:
+        return TOKENIZER, MODEL
+
+    log.info(f"Loading Transformers model '{MODEL_NAME}'...")
+    tokenizer = AutoTokenizer.from_pretrained(
+        MODEL_NAME,
+        trust_remote_code=MODEL_TRUST_REMOTE_CODE,
+    )
+
+    model_kwargs: dict[str, object] = {
+        "trust_remote_code": MODEL_TRUST_REMOTE_CODE,
+        "low_cpu_mem_usage": True,
     }
+    if torch.cuda.is_available():
+        model_kwargs["device_map"] = MODEL_DEVICE_MAP
+        model_kwargs["torch_dtype"] = MODEL_TORCH_DTYPE
+    else:
+        model_kwargs["torch_dtype"] = torch.float32
+
+    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, **model_kwargs)
+    model.eval()
+
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token or tokenizer.unk_token
+
+    TOKENIZER = tokenizer
+    MODEL = model
+    return tokenizer, model
+
+
+def _format_messages(messages: list[dict]) -> str:
+    parts: list[str] = []
+    for message in messages:
+        role = str(message.get("role", "user")).upper()
+        content = message.get("content", "")
+        parts.append(f"{role}: {content}")
+    parts.append("ASSISTANT:")
+    return "\n\n".join(parts)
+
+
+def call_model(messages: list[dict]) -> str | None:
+    """Call the local Transformers model. Returns raw text or None on failure."""
     try:
-        resp = requests.post(
-            f"{OLLAMA_BASE_URL}/api/chat",
-            json=payload,
-            timeout=OLLAMA_TIMEOUT,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["message"]["content"]
-    except requests.exceptions.ConnectionError:
-        log.error("Cannot connect to Ollama. Is it running? (`ollama serve`)")
-        return None
-    except requests.exceptions.Timeout:
-        log.warning("Ollama request timed out.")
-        return None
+        tokenizer, model = _load_transformers_model()
+
+        try:
+            inputs = tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+            )
+        except Exception:
+            prompt = _format_messages(messages)
+            inputs = tokenizer(prompt, return_tensors="pt")
+
+        if hasattr(model, "device"):
+            device = model.device
+        else:
+            device = next(model.parameters()).device
+        inputs = {key: value.to(device) for key, value in inputs.items()}
+
+        with torch.inference_mode():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=MODEL_MAX_NEW_TOKENS,
+                do_sample=MODEL_DO_SAMPLE,
+                temperature=MODEL_TEMPERATURE,
+                top_p=MODEL_TOP_P,
+                repetition_penalty=MODEL_REPETITION_PENALTY,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+
+        generated_ids = outputs[0][inputs["input_ids"].shape[-1]:]
+        return tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
     except Exception as e:
-        log.warning(f"Ollama call failed: {e}")
+        log.warning(f"Transformers call failed: {e}")
         return None
+
+
+def health_check() -> bool:
+    """Load the model and run a tiny generation as a startup check."""
+    log.info(f"Checking Transformers model '{MODEL_NAME}'...")
+    ping_messages = [{"role": "user", "content": "Reply with exactly {\"hello\": \"world\"}."}]
+    response = call_model(ping_messages)
+    if response is None:
+        log.error("  ✗ Transformers model health check failed")
+        return False
+
+    log.info("  ✓ Transformers responding OK")
+    return True
 
 
 def process_one(row: dict, use_system_role: bool = True) -> dict | None:
@@ -231,7 +308,7 @@ def process_one(row: dict, use_system_role: bool = True) -> dict | None:
 
     for attempt in range(1, MAX_RETRIES + 1):
         messages = build_fn(journal, categories, aims)
-        raw = call_ollama(messages)
+        raw = call_model(messages)
 
         if raw is None:
             log.warning(f"  Attempt {attempt}/{MAX_RETRIES}: No response for '{journal}'")
@@ -291,21 +368,8 @@ def run():
 
     stats = {"success": 0, "failed": 0, "skipped": 0}
 
-    # Health check — verify Ollama is responding before starting
-    log.info(f"Checking Ollama at {OLLAMA_BASE_URL} with model '{OLLAMA_MODEL}'...")
-    try:
-        ping = requests.post(
-            f"{OLLAMA_BASE_URL}/api/chat",
-            json={"model": OLLAMA_MODEL, "messages": [{"role":"user","content":"ping"}],
-                  "stream": False, "think": False,
-                  "options": {"num_predict": 5}},
-            timeout=30,
-        )
-        ping.raise_for_status()
-        log.info("  ✓ Ollama responding OK")
-    except Exception as e:
-        log.error(f"  ✗ Ollama health check failed: {e}")
-        log.error("  Make sure Ollama is running: `ollama serve`")
+    # Health check — verify the local Transformers model is loadable before starting
+    if not health_check():
         sys.exit(1)
 
     # Open output files in append mode
@@ -398,7 +462,7 @@ def run():
 def retry_failed():
     """
     Re-process all rows in failed.jsonl.
-    Useful after fixing prompts or when Ollama was temporarily down.
+    Useful after fixing prompts or when the model produced invalid output.
     """
     if not FAILED_LOG.exists():
         log.info("No failed.jsonl found.")
@@ -411,9 +475,11 @@ def retry_failed():
         log.info("failed.jsonl is empty.")
         return
 
-    # Filter out rows with empty journal name or missing aims
-    valid_rows   = [r for r in failed_rows if r.get("journal", "").strip()]
-    invalid_rows = [r for r in failed_rows if not r.get("journal", "").strip()]
+    # SỬA Ở ĐÂY: Dùng COL_JOURNAL thay vì hardcode "journal"
+    # Đồng thời dự phòng thêm fallback lấy key "journal" (nếu có)
+    valid_rows   = [r for r in failed_rows if r.get(COL_JOURNAL, r.get("journal", "")).strip()]
+    invalid_rows = [r for r in failed_rows if not r.get(COL_JOURNAL, r.get("journal", "")).strip()]
+    
     if invalid_rows:
         log.warning(f"Skipping {len(invalid_rows)} rows with empty journal name")
 
@@ -434,7 +500,7 @@ def retry_failed():
                 }
                 out_f.write(json.dumps(record, ensure_ascii=False) + "\n")
                 out_f.flush()
-                log.info(f"  ✓ Recovered: '{row.get('journal')}'")
+                log.info(f"  ✓ Recovered: '{row.get(COL_JOURNAL, row.get('journal', ''))}'")
             else:
                 new_failures.append(row)
 
@@ -445,7 +511,6 @@ def retry_failed():
 
     log.info(f"Retry done. Recovered: {len(failed_rows) - len(new_failures)} | "
              f"Still failed: {len(new_failures)}")
-
 
 # ── Entry point ───────────────────────────────────────────────
 
@@ -462,13 +527,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         default=None,
-        help="Override Ollama model (e.g. --model mistral)",
+        help="Override Transformers model id (e.g. --model Qwen/Qwen3.5-4B-Instruct)",
     )
     args = parser.parse_args()
 
     if args.model:
         import config
-        config.OLLAMA_MODEL = args.model
+        config.MODEL_NAME = args.model
         log.info(f"Model overridden to: {args.model}")
 
     if args.mode == "retry":
