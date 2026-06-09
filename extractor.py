@@ -87,41 +87,84 @@ def load_processed_ids() -> set[str]:
     return processed
 
 
+def repair_json(text: str) -> str:
+    """
+    Attempt to fix common LLM JSON errors before parsing:
+    1. Inline comments:  ["value" is implied by something]  →  ["value"]
+    2. Trailing commas:  ["a", "b",]  →  ["a", "b"]
+    3. Truncated JSON:   close any unclosed braces/brackets
+    """
+    # Remove inline comments inside arrays: "text" is something → just remove the comment part
+    # Pattern: inside [...], after a closing quote, there's unquoted text before ] or ,
+    text = re.sub(r'"([^"]*)"\s+[^",\]\}\[\{]+(?=[,\]\}])', r'"\1"', text)
+
+    # Remove trailing commas before } or ]
+    text = re.sub(r',\s*([\}\]])', r'\1', text)
+
+    # If JSON is truncated (unbalanced braces), try to close it
+    open_braces   = text.count('{') - text.count('}')
+    open_brackets = text.count('[') - text.count(']')
+    if open_braces > 0 or open_brackets > 0:
+        stripped = text.rstrip()
+        # Close any unterminated string (count unescaped quotes)
+        n_quotes = len(re.findall(r'(?<!\\)"', stripped))
+        if n_quotes % 2 == 1:
+            stripped += '"'           # close the open string
+        # Add closing brackets then braces
+        text = stripped + (']' * max(0, open_brackets)) + ('}' * max(0, open_braces))
+
+    return text
+
+
 def extract_json_from_response(text: str) -> dict | None:
     """
     Robustly extract JSON from LLM output.
-    Handles: clean JSON, JSON inside ```json ... ```, leading/trailing text,
-    and qwen3 <think>...</think> blocks.
+    Handles:
+      - qwen3 <think>...</think> blocks
+      - Markdown code fences
+      - Inline comments in arrays (LLM hallucination)
+      - Truncated JSON (output cut off mid-generation)
+      - Trailing commas
     """
     text = text.strip()
 
-    # Strip qwen3 thinking blocks (may appear even with think=False)
-    text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
+    # Strip qwen3 thinking blocks
+    text = re.sub(r'<think>[\s\S]*?</think>', '', text).strip()
+    text = re.sub(r'Thinking Process:[\s\S]*?(?=\{)', '', text).strip()
 
-    # Also strip bare "Thinking Process:" sections (qwen3.5 variant)
-    text = re.sub(r"Thinking Process:[\s\S]*?(?=\{)", "", text).strip()
+    # Strip markdown code fences
+    fence_match = re.search(r'```(?:json)?\s*([\s\S]+?)\s*```', text)
+    if fence_match:
+        text = fence_match.group(1).strip()
 
-    # Try direct parse first
+    # Extract the outermost { ... } block
+    start = text.find('{')
+    if start == -1:
+        return None
+    # Find matching closing brace
+    depth = 0
+    end = -1
+    for i, ch in enumerate(text[start:], start):
+        if ch == '{': depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    json_str = text[start:end+1] if end != -1 else text[start:]
+
+    # Try direct parse
     try:
-        return json.loads(text)
+        return json.loads(json_str)
     except json.JSONDecodeError:
         pass
 
-    # Strip markdown code fences
-    fence_match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text)
-    if fence_match:
-        try:
-            return json.loads(fence_match.group(1))
-        except json.JSONDecodeError:
-            pass
-
-    # Find the LAST (most complete) { ... } block — qwen3 sometimes adds trailing text
-    brace_matches = list(re.finditer(r"\{[\s\S]+\}", text))
-    for match in reversed(brace_matches):
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            continue
+    # Try after repair
+    repaired = repair_json(json_str)
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        pass
 
     return None
 
@@ -214,12 +257,9 @@ def process_one(row: dict, use_system_role: bool = True) -> dict | None:
 
 
 def log_failed(row: dict, error: str, out_file):
-    record = {
-        "journal":    row.get(COL_JOURNAL, ""),
-        "label":      row.get(COL_LABEL, ""),
-        "categories": row.get(COL_CATEGORIES, ""),
-        "error":      error,
-    }
+    # Sao chép toàn bộ các trường ban đầu từ CSV để giữ lại cột Aims, Journal, v.v.
+    record = dict(row)
+    record["error"] = error
     out_file.write(json.dumps(record, ensure_ascii=False) + "\n")
     out_file.flush()
 
@@ -251,6 +291,23 @@ def run():
 
     stats = {"success": 0, "failed": 0, "skipped": 0}
 
+    # Health check — verify Ollama is responding before starting
+    log.info(f"Checking Ollama at {OLLAMA_BASE_URL} with model '{OLLAMA_MODEL}'...")
+    try:
+        ping = requests.post(
+            f"{OLLAMA_BASE_URL}/api/chat",
+            json={"model": OLLAMA_MODEL, "messages": [{"role":"user","content":"ping"}],
+                  "stream": False, "think": False,
+                  "options": {"num_predict": 5}},
+            timeout=30,
+        )
+        ping.raise_for_status()
+        log.info("  ✓ Ollama responding OK")
+    except Exception as e:
+        log.error(f"  ✗ Ollama health check failed: {e}")
+        log.error("  Make sure Ollama is running: `ollama serve`")
+        sys.exit(1)
+
     # Open output files in append mode
     with (
         open(OUTPUT_JSONL, "a", encoding="utf-8") as out_f,
@@ -274,6 +331,13 @@ def run():
             # Skip if somehow already in output (e.g. re-run after partial batch)
             if journal_name in already_processed:
                 log.debug(f"  Skipping already-processed: '{journal_name}'")
+                stats["skipped"] += 1
+                save_checkpoint(idx)
+                continue
+
+            # Skip rows with no journal name or no aims
+            if not journal_name or not row.get(COL_AIMS, "").strip():
+                log.warning(f"  Skipping row {idx} — empty journal name or aims")
                 stats["skipped"] += 1
                 save_checkpoint(idx)
                 continue
@@ -347,19 +411,25 @@ def retry_failed():
         log.info("failed.jsonl is empty.")
         return
 
-    log.info(f"Retrying {len(failed_rows)} failed journals...")
+    # Filter out rows with empty journal name or missing aims
+    valid_rows   = [r for r in failed_rows if r.get("journal", "").strip()]
+    invalid_rows = [r for r in failed_rows if not r.get("journal", "").strip()]
+    if invalid_rows:
+        log.warning(f"Skipping {len(invalid_rows)} rows with empty journal name")
+
+    log.info(f"Retrying {len(valid_rows)} failed journals...")
     new_failures = []
 
     with open(OUTPUT_JSONL, "a", encoding="utf-8") as out_f:
-        for row in tqdm(failed_rows, desc="Retrying"):
+        for row in tqdm(valid_rows, desc="Retrying"):
             result = process_one(row)
             if result is not None:
                 record = {
                     "_schema":    SCHEMA_VERSION,
                     "_idx":       -1,   # unknown original index
-                    "journal":    row.get("journal", ""),
-                    "label":      row.get("label", ""),
-                    "categories": row.get("categories", ""),
+                    "journal":    row.get(COL_JOURNAL, row.get("journal", "")),
+                    "label":      row.get(COL_LABEL, row.get("label", "")),
+                    "categories": row.get(COL_CATEGORIES, row.get("categories", "")),
                     **result,
                 }
                 out_f.write(json.dumps(record, ensure_ascii=False) + "\n")

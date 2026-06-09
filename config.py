@@ -23,7 +23,8 @@ OLLAMA_MODEL    = "qwen3.5:4b"        # ← updated
 OLLAMA_TIMEOUT  = 120                 # seconds per request
 OLLAMA_OPTIONS  = {
     "temperature": 0.1,               # Low temp → consistent structured output
-    "num_predict": 2048,              # Increased — JSON output can be ~800-1200 tokens
+    "num_predict": 1500,              # Max output tokens — JSON output ~800-1500 tokens
+    "num_ctx":     2048,              # Context window — long Aims & Scope can be ~1500 tokens
 }
 # NOTE: think=False is passed at TOP-LEVEL payload in call_ollama(), not here
 # Putting it in options silently fails on some Ollama versions
@@ -32,7 +33,7 @@ OLLAMA_OPTIONS  = {
 BATCH_SIZE       = 10     # Save checkpoint every N records
 MAX_RETRIES      = 3      # Retry failed LLM calls
 RETRY_DELAY_SEC  = 5      # Wait between retries
-SLEEP_BETWEEN_MS = 200    # Throttle (ms) between calls — set 0 for max speed
+SLEEP_BETWEEN_MS = 100    # Throttle (ms) between calls — set 0 for max speed
 
 # ── Output schema version (for future migrations) ─────────────
 SCHEMA_VERSION = "1.0"

@@ -17,25 +17,25 @@ Your task is to extract two structured fields from a journal's metadata:
 Extraction rules:
 1. Use the Categories field as the PRIMARY source for scientific_domains (they are curated taxonomy labels).
 2. Use the Aims & Scope text as the PRIMARY source for research_focuses AND as evidence for both fields.
-3. For each domain/focus you extract, capture 1–3 SHORT evidence phrases (≤10 words each) directly from the Aims & Scope text that justify the label.
-4. Labels must be noun phrases in English, title-cased (e.g. "Clinical Neurology", not "clinical neurology" or "studies on neurology").
-5. scientific_domains should be broad disciplines (5–15 words max per label).
-6. research_focuses should be specific topics or methodologies (can be more granular).
-7. Aim for 2–6 scientific_domains and 3–10 research_focuses depending on journal breadth.
-8. Do NOT hallucinate domains not supported by either Categories or Aims text.
-9. Output ONLY a valid JSON object — no markdown, no explanation, no preamble.
+3. For each domain/focus, capture 1–2 SHORT evidence phrases (≤8 words each) verbatim from the Aims & Scope text.
+4. Labels must be noun phrases in English, title-cased (e.g. "Clinical Neurology").
+5. scientific_domains: broad disciplines, 2–5 labels max.
+6. research_focuses: specific topics or methodologies, 3–7 labels max.
+7. Do NOT hallucinate domains not supported by text. Do NOT add comments inside JSON.
+8. Evidence MUST be exact quoted substrings from the Aims text — never inferred or paraphrased.
+9. Output ONLY a valid RFC-8259 JSON object. No markdown fences, no comments, no trailing commas, no explanation.
 
 Output schema (strict):
 {
   "scientific_domains": ["Domain1", "Domain2"],
   "scientific_domains_evidence": {
-    "Domain1": ["evidence phrase 1", "evidence phrase 2"],
-    "Domain2": ["evidence phrase 1"]
+    "Domain1": ["exact phrase from aims", "another exact phrase"],
+    "Domain2": ["exact phrase from aims"]
   },
   "research_focuses": ["Focus1", "Focus2", "Focus3"],
   "research_focuses_evidence": {
-    "Focus1": ["evidence phrase 1", "evidence phrase 2"],
-    "Focus2": ["evidence phrase 1"]
+    "Focus1": ["exact phrase from aims"],
+    "Focus2": ["exact phrase from aims"]
   }
 }"""
 

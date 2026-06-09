@@ -4,7 +4,7 @@ Trích xuất `scientific_domains` và `research_focuses` từ 1406 journals dù
 
 ## Cấu trúc project
 
-```
+```architecture
 journal_extractor/
 ├── config.py           # Cấu hình tập trung (model, paths, batch size…)
 ├── prompt_builder.py   # Prompt engineering + few-shot examples
@@ -95,7 +95,8 @@ python extractor.py   # Tự động tiếp tục từ chỗ dừng
 ## Tuning cho 1 triệu papers (tương lai)
 
 Trong `config.py`, điều chỉnh:
+
 - `SLEEP_BETWEEN_MS = 0`    — tắt throttle nếu Ollama đủ mạnh
 - `BATCH_SIZE = 100`         — log ít hơn
 - `OLLAMA_MODEL = "..."`     — dùng model nhỏ hơn (e.g. gemma2:2b) cho papers
-- `OLLAMA_OPTIONS.num_predict = 512`  — cắt output ngắn hơn nếu papers đơn giản hơn
+- `OLLAMA_OPTIONS.num_predict = 512`  — cắt output ngắn hơn nếu papers đơn giản hơn.
