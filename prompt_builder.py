@@ -115,9 +115,9 @@ FEW_SHOT_EXAMPLES = [
 
 def build_prompt(journal_name: str, categories: str, aims: str) -> list[dict]:
     """
-    Build the messages list for Ollama chat API.
-    Uses few-shot examples embedded in the user turn for models
-    that don't support a 'system' role well (e.g. some Ollama backends).
+  Build the chat messages list for a Transformers chat model.
+  Uses few-shot examples embedded in the user turn for models
+  that don't support a 'system' role well.
     Returns: list of message dicts {"role": ..., "content": ...}
     """
     # Format few-shot block
