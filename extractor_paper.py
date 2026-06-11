@@ -400,25 +400,83 @@ def retry_failed():
 
 if __name__ == "__main__":
 	import argparse
+	from pathlib import Path as _Path
+	import config as _cfg
 
-	parser = argparse.ArgumentParser(description="Paper metadata extraction pipeline")
+	parser = argparse.ArgumentParser(
+		description="Paper metadata extraction pipeline",
+		formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+	)
 	parser.add_argument(
-		"--mode",
-		choices=["run", "retry"],
-		default="run",
+		"--mode", choices=["run", "retry"], default="run",
 		help="'run' = full pipeline; 'retry' = re-process failed rows only",
 	)
-	parser.add_argument(
-		"--model",
-		default=None,
-		help="Override Transformers model id (e.g. --model Qwen/Qwen3.5-4B-Instruct)",
-	)
+	# ── Path overrides (essential for Kaggle) ────────────────────
+	parser.add_argument("--input", default=None,
+		help="Input CSV path (overrides config.INPUT_PAPERS_CSV)")
+	parser.add_argument("--output", default=None,
+		help="Output JSONL path (overrides config.OUTPUT_PAPERS_JSONL)")
+	parser.add_argument("--checkpoint", default=None,
+		help="Checkpoint file path (overrides config.CHECKPOINT_PAPERS)")
+	parser.add_argument("--failed", default=None,
+		help="Failed log path (overrides config.FAILED_PAPERS)")
+	# ── Model / inference overrides ───────────────────────────────
+	parser.add_argument("--model", default=None,
+		help="HuggingFace model id (e.g. Qwen/Qwen3.5-4B-Instruct)")
+	parser.add_argument("--prompt-batch-size", type=int, default=None,
+		dest="prompt_batch_size",
+		help="Papers per LLM batch call (overrides config.PROMPT_BATCH_SIZE)")
+	parser.add_argument("--max-new-tokens", type=int, default=None,
+		dest="max_new_tokens",
+		help="Max output tokens per generation (overrides config.MODEL_MAX_NEW_TOKENS)")
+	parser.add_argument("--batch-size", type=int, default=None,
+		dest="batch_size",
+		help="Checkpoint/log interval in records (overrides config.BATCH_SIZE)")
 	args = parser.parse_args()
 
+	# ── Apply path overrides ──────────────────────────────────────
+	if args.input:
+		_cfg.INPUT_PAPERS_CSV = _Path(args.input)
+		globals()["INPUT_PAPERS_CSV"] = _Path(args.input)
+		log.info(f"Input overridden to: {args.input}")
+	if args.output:
+		_cfg.OUTPUT_PAPERS_JSONL = _Path(args.output)
+		globals()["OUTPUT_PAPERS_JSONL"] = _Path(args.output)
+		log.info(f"Output overridden to: {args.output}")
+	if args.checkpoint:
+		_cfg.CHECKPOINT_PAPERS = _Path(args.checkpoint)
+		globals()["CHECKPOINT_PAPERS"] = _Path(args.checkpoint)
+		log.info(f"Checkpoint overridden to: {args.checkpoint}")
+	if args.failed:
+		_cfg.FAILED_PAPERS = _Path(args.failed)
+		globals()["FAILED_PAPERS"] = _Path(args.failed)
+		log.info(f"Failed log overridden to: {args.failed}")
+
+	# ── Apply model / inference overrides ─────────────────────────
 	if args.model:
-		import config
-		config.MODEL_NAME = args.model
+		_cfg.MODEL_NAME = args.model
+		try:
+			import extractor as _ext
+			_ext.MODEL_NAME = args.model
+		except Exception:
+			pass
 		log.info(f"Model overridden to: {args.model}")
+	if args.prompt_batch_size:
+		_cfg.PROMPT_BATCH_SIZE = args.prompt_batch_size
+		globals()["PROMPT_BATCH_SIZE"] = args.prompt_batch_size
+		log.info(f"PROMPT_BATCH_SIZE overridden to: {args.prompt_batch_size}")
+	if args.max_new_tokens:
+		_cfg.MODEL_MAX_NEW_TOKENS = args.max_new_tokens
+		try:
+			import extractor as _ext
+			_ext.MODEL_MAX_NEW_TOKENS = args.max_new_tokens
+		except Exception:
+			pass
+		log.info(f"MODEL_MAX_NEW_TOKENS overridden to: {args.max_new_tokens}")
+	if args.batch_size:
+		_cfg.BATCH_SIZE = args.batch_size
+		globals()["BATCH_SIZE"] = args.batch_size
+		log.info(f"BATCH_SIZE overridden to: {args.batch_size}")
 
 	if args.mode == "retry":
 		retry_failed()
